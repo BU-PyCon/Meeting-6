@@ -4,6 +4,8 @@ import numpy as np
 import re
 import sys
 from astropy.io import fits
+import astropy.visualization as vis
+import matplotlib.pyplot as plt
 
 ###----------------------------------------------
 #
@@ -85,11 +87,14 @@ class DataEnc(metaclass = abc.ABCMeta):
             
             #Extract the prescan, image, and overscan
             self.__prescan     = data[0:self.__header[0]['PRESCAN']]
-            self.__image     = data[self.__header[0]['PRESCAN']:self.__header[0]['NAXIS1']-self.__header[0]['POSTSCAN']]
-            self.__overscan = data[self.__header[0]['NAXIS1']-self.__header[0]['POSTSCAN']:]
+            self.__image       = np.transpose(data[self.__header[0]['PRESCAN']:self.__header[0]['NAXIS1']-self.__header[0]['POSTSCAN']])
+            self.__postscan    = data[self.__header[0]['NAXIS1']-self.__header[0]['POSTSCAN']:]
             
             #Correct the image
             self.__correctImage(subtractOverscans, removeCosmicRays)
+
+            #Keep an original copy of the image, in case we have to revert back to it
+            self.__original = self.__image
             
         except FileNotFoundError:
             print('FileNotFoundError: Could not find "'+path+'"')
@@ -103,10 +108,49 @@ class DataEnc(metaclass = abc.ABCMeta):
     
     def __correctImage(self, subtractOverscans, removeCosmicRays):
         """
+        Name: __correctImage
+
+        Description:
         Internal "private" method to correct images for various
         factors such as overscan biases and cosmic rays.
+
+        Parameters:
+        subtractOverscans    This is a boolean indicating whether the overscans
+                             should be used to correct the image.
+        removeCosmicRays     This is a boolean indicating whether anomalously
+                             high values, i.e., cosmic rays, should be smoothed out
         """
-        pass
+        if (subtractOverscans):
+            #Fine the mean of both the pre and post scan regions and subtract that value
+            #from each element of the image.
+            overscanMean = np.mean(np.concatenate((self.prescan, self.postscan)))
+            self.__image -= overscanMean
+
+        if (removeCosmicRays):
+            #This component removes anomalously high values within the image by setting it
+            #to the average of the surrounding values instead.
+            pass
+    
+    def scale(self, scale = 'linear', power = 1.0, min_cut = None, max_cut = None):
+        """
+        Name: scale
+
+        Description:
+        Allows for rescaling the image. This will always scale the original
+        image so calling scale a second time on the image will overwrite
+        a previous scaling.
+
+        Parameters:
+        scale
+        power
+        min_cut
+        max_cut
+        """
+        self.__image = vis.scale_image(self.__original,
+                                       scale = scale,
+                                       power = power,
+                                       min_cut = min_cut,
+                                       max_cut = max_cut)
     
     ### Class Methods ###
     
@@ -135,9 +179,10 @@ class DataEnc(metaclass = abc.ABCMeta):
         
         """
         result = sum(args)
-        result.__prescan/self.numbImagesCombined
-        result.__image/self.numbImagesCombined
-        result.__overscan/self.numbImagesCombined
+        result.__prescan  /= self.numbImagesCombined
+        result.__image    /= self.numbImagesCombined
+        result.__original /= self.numbImagesCombined
+        result.__postscan /= self.numbImagesCombined
         
         return result
     
@@ -168,13 +213,49 @@ class DataEnc(metaclass = abc.ABCMeta):
             result = copy.deepcopy(self)    #Create a deep copy so as to not change this instance
             result.name.append(other.name[0])
             result.__header.append(other.__header[0])
-            result.__prescan += other.__prescan
-            result.__image += other.__image
-            result.__overscan += other.__overscan
+            result.__prescan  += other.__prescan
+            result.__image    += other.__image
+            result.__original += other.__original
+            result.__postscan += other.__postscan
             
             return result
         except ValueError:
             print('ValueError: Could not add images together. Improper sizes')
+            return
+    
+    def __div__(self, other):
+        """
+        Name: __div__
+        
+        Description:
+        Overrides the divide method to allow for dividing multiple
+        images together, resulting in a new image which is the first divided by the
+        second. The headers and name of the individual images are appended
+        together into an array.
+        
+        Parameters:
+        other   The other instance of this class which is being divided from
+                this instance.
+        
+        Returns:
+        A new instance which is the division of this instance and the input instance.
+        The new header will be a list containing the header of both individual
+        instances while the actual data arrays will simply be summed element-wise.
+        This method will make sure to only add instances together if they have
+        the same conditions.
+        """
+        try:
+            result = copy.deepcopy(self)    #Create a deep copy so as to not change this instance
+            result.name.append(other.name[0])
+            result.__header.append(other.__header[0])
+            result.__prescan  /= other.__prescan
+            result.__image    /= other.__image
+            result.__original /= other.__original
+            result.__postscan /= other.__postscan
+            
+            return result
+        except ValueError:
+            print('ValueError: Could not divide the images. Improper sizes')
             return
     
     def __sub__(self, other):
@@ -198,27 +279,40 @@ class DataEnc(metaclass = abc.ABCMeta):
             result = copy.deepcopy(self)    #Create a deep copy so as to not change this instance
             result.name.append(other.name[0])
             result.__header.append(other.__header[0])
-            result.__prescan -= other.__prescan
-            result.__image -= other.__image
-            result.__overscan -= other.__overscan
+            result.__prescan  -= other.__prescan
+            result.__image    -= other.__image
+            result.__original -= other.__original
+            result.__postscan -= other.__postscan
             
             return result
         except ValueError:
             print('ValueError: Could not subtract images. Improper sizes')
     
     def __str__(self):
-        str = 'This image is the combination of ' + str(self.numbImagesCombined) + ' images.\n\n' if self.numbImagesCombined > 2 else ''
-        for i in range(self.numbImagesCombined):
-            str += 'SUMMARY FOR     ' + self.name[i] + '\n' + \
-                   'Obs Type:       ' + self.obsType[i] + '\n' + \
-                   'Filter:         ' + self.filter[i] + '\n' + \
-                   'RA/DEC:         ' + self.ra[i] + '   ' + self.dec[i] + '\n' + \
-                   'UTC Obs Time:   ' + self.date[i] + '\n' + \
-                   'Hour Angle:     ' + self.hourAngle[i] + '\n' + \
-                   'Exposure Time:  ' + str(self.expTime[i]) + ' seconds\n' + \
-                   'Airmass:        ' + str(self.airmass[i]) + '\n' + \
-                   'Image Size:     ' + str(self.width[i]) + ' x ' + str(self.height[i]) + '\n' + \
-                   'Plate Scale:    ' + str(self.plateScale[i]) + ' arcsec/pix\n\n'
+        if self.numbImagesCombined == 1:
+            str =  'SUMMARY FOR     ' + self.name + '\n' + \
+                   'Obs Type:       ' + self.obsType + '\n' + \
+                   'Filter:         ' + self.filter + '\n' + \
+                   'RA/DEC:         ' + self.ra + '   ' + self.dec[i] + '\n' + \
+                   'UTC Obs Time:   ' + self.date + '\n' + \
+                   'Hour Angle:     ' + self.hourAngle + '\n' + \
+                   'Exposure Time:  ' + str(self.expTime) + ' seconds\n' + \
+                   'Airmass:        ' + str(self.airmass) + '\n' + \
+                   'Image Size:     ' + str(self.width) + ' x ' + str(self.height[i]) + '\n' + \
+                   'Plate Scale:    ' + str(self.plateScale) + ' arcsec/pix\n\n'
+        else:
+            str = 'This image is the combination of ' + str(self.numbImagesCombined) + ' images.\n\n'
+            for i in range(self.numbImagesCombined):
+                str += 'SUMMARY FOR     ' + self.name[i] + '\n' + \
+                       'Obs Type:       ' + self.obsType[i] + '\n' + \
+                       'Filter:         ' + self.filter[i] + '\n' + \
+                       'RA/DEC:         ' + self.ra[i] + '   ' + self.dec[i] + '\n' + \
+                       'UTC Obs Time:   ' + self.date[i] + '\n' + \
+                       'Hour Angle:     ' + self.hourAngle[i] + '\n' + \
+                       'Exposure Time:  ' + str(self.expTime[i]) + ' seconds\n' + \
+                       'Airmass:        ' + str(self.airmass[i]) + '\n' + \
+                       'Image Size:     ' + str(self.width[i]) + ' x ' + str(self.height[i]) + '\n' + \
+                       'Plate Scale:    ' + str(self.plateScale[i]) + ' arcsec/pix\n\n'
     
     def __repr__(self):
         return self.__str__()
@@ -323,11 +417,11 @@ class DataEnc(metaclass = abc.ABCMeta):
         raise(IndexError('No header files found'))
     
     @property
-    def overscan(self):
-        return self.__overscan
+    def postscan(self):
+        return self.__postscan
     
     @property
-    def overscanPix(self):
+    def postscanPix(self):
         return self.__header[0]['POSTSCAN']
     
     @property
@@ -415,6 +509,8 @@ class Flat(DataEnc):
     def __init__(self, path, subtractOverscans = True, removeCosmicRays = True):
         super().__init__(path, subtractOverscans, removeCosmicRays)
         Flat.__numbFlat += 1
+
+        self.isBiasCorrected = False
     
     ### Destructor ###
     
@@ -423,7 +519,13 @@ class Flat(DataEnc):
     
     ### Utility Methods ###
     
-    
+    def subtractBias(self, biasFrame):
+        """
+        Method to subtract the input bias image from
+        this instance.
+        """
+        self -= biasFrame
+        self._isBiasCorrected = True
     
     ### Static Methods ###
     
@@ -432,6 +534,10 @@ class Flat(DataEnc):
         return Flat.__numbFlat
     
     ### Property Methods ###
+
+    @property
+    def isBiasCorrected(self):
+        return self._isBiasCorrected
     
 
 ###----------------------------------------------
@@ -458,6 +564,10 @@ class Image(DataEnc):
     def __init__(self, path, subtractOverscans = True, removeCosmicRays = True):
         super().__init__(path, subtractOverscans, removeCosmicRays)
         Image.__numbImages += 1
+
+        self._isBiasCorrected = False
+        self._isFlatCorrected = False
+        
     
     ### Destructor ###
     
@@ -472,13 +582,15 @@ class Image(DataEnc):
         this instance.
         """
         self -= biasFrame
+        self._isBiasCorrected = True
     
-    def subtractFlat(self, flatFrame):
+    def divideFlat(self, flatFrame):
         """
         Method to subtract the input flat image from
         this instance.
         """
-        self -= flatFrame
+        self /= flatFrame
+        self._isFlatCorrected = True
     
     def findCentroid(self):
         """
@@ -487,11 +599,19 @@ class Image(DataEnc):
         """
         pass
     
-    def show(self):
+    def show(self, cmap = 'jet'):
         """
         Plots the image so it can be seen visually.
+
+        Parameters
+        cmap    The colormap used to plot the image. The default is 'jet' which
+                is a rainbow color map. Other potential maps include 'Blues',
+                'Reds', 'rainbow', 'gray', 'brg', or 'gist_rainbow'. For a full
+                list of possible colormaps, see
+                http://matplotlib.org/examples/color/colormaps_reference.html
         """
-        pass
+        plt.imshow(self.image, cmap = cmap)
+        plt.show(block = False)
     
     ### Static Methods ###
     
@@ -501,4 +621,10 @@ class Image(DataEnc):
     
     ### Property Methods ###
     
-    
+    @property
+    def isBiasCorrected(self):
+        return self._isBiasCorrected
+
+    @property
+    def isFlatCorrected(self):
+        return self._isFlatCorrected
